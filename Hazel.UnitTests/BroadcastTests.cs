@@ -1,9 +1,9 @@
-﻿using Hazel.Udp;
-using Microsoft.VisualStudio.TestTools.UnitTesting;
+﻿using Microsoft.VisualStudio.TestTools.UnitTesting;
 using System;
 using System.Linq;
 using System.Net;
 using System.Threading;
+using Impostor.Hazel.Udp;
 
 namespace Hazel.UnitTests
 {

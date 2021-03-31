@@ -1,7 +1,7 @@
 using System;
 using System.Diagnostics;
 
-namespace Hazel.Crypto
+namespace Impostor.Hazel.Crypto
 {
     /// <summary>
     /// The x25519 key agreement algorithm

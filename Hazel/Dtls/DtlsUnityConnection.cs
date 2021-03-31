@@ -1,5 +1,3 @@
-using Hazel.Crypto;
-using Hazel.Udp;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -7,8 +5,11 @@ using System.IO;
 using System.Net;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
+using Impostor.Hazel.Crypto;
+using Impostor.Hazel.Udp;
+using Impostor.Hazel.UPnP;
 
-namespace Hazel.Dtls
+namespace Impostor.Hazel.Dtls
 {
     /// <summary>
     /// Connects to a UDP-DTLS server

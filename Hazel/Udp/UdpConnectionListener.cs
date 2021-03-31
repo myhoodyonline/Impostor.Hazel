@@ -4,7 +4,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Threading;
 
-namespace Hazel.Udp
+namespace Impostor.Hazel.Udp
 {
     /// <summary>
     ///     Listens for new UDP connections and creates UdpConnections for them.

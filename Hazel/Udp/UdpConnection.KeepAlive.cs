@@ -3,8 +3,7 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Threading;
 
-
-namespace Hazel.Udp
+namespace Impostor.Hazel.Udp
 {
     partial class UdpConnection
     {

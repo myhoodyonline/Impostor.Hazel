@@ -2,7 +2,7 @@
 using System.Net;
 using System.Threading;
 using System.Threading.Tasks;
-using Hazel.Udp;
+using Impostor.Hazel.Udp;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 
 namespace Hazel.UnitTests

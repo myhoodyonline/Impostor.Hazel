@@ -1,11 +1,10 @@
 using System;
-using System.Collections.Generic;
 using System.Diagnostics;
 using System.Net;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 
-namespace Hazel.Dtls
+namespace Impostor.Hazel.Dtls
 {
     /// <summary>
     /// Handshake message type

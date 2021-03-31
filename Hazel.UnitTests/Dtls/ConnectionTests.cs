@@ -1,12 +1,14 @@
-using Hazel.Dtls;
-using Hazel.Udp;
-using Hazel.Udp.FewerThreads;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using System;
 using System.Net;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Threading;
+using Impostor.Hazel;
+using Impostor.Hazel.Dtls;
+using Impostor.Hazel.FewerThreads;
+using Impostor.Hazel.Udp;
+using Impostor.Hazel.UPnP;
 
 namespace Hazel.UnitTests.Dtls
 {

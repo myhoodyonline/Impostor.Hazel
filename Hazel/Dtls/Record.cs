@@ -1,4 +1,4 @@
-namespace Hazel.Dtls
+namespace Impostor.Hazel.Dtls
 {
     /// <summary>
     /// DTLS version constants

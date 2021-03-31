@@ -1,9 +1,9 @@
-using Hazel.Crypto;
 using System;
 using System.Diagnostics;
 using System.Security.Cryptography;
+using Impostor.Hazel.Crypto;
 
-namespace Hazel.Dtls
+namespace Impostor.Hazel.Dtls
 {
     /// <summary>
     /// ECDHE_RSA_*_256 cipher suite

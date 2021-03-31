@@ -1,7 +1,8 @@
 using System;
 using System.Net;
+using Impostor.Hazel.Udp;
 
-namespace Hazel.Udp.FewerThreads
+namespace Impostor.Hazel.FewerThreads
 {
     /// <summary>
     /// Represents a servers's connection to a client that uses the UDP protocol.

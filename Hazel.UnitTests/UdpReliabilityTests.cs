@@ -1,6 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
-using Hazel.Udp;
+using Impostor.Hazel;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 
 namespace Hazel.UnitTests

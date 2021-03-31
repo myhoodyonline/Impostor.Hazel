@@ -3,8 +3,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Threading;
 
-
-namespace Hazel.Udp
+namespace Impostor.Hazel.Udp
 {
     /// <summary>
     /// Unity doesn't always get along with thread pools well, so this interface will hopefully suit that case better.

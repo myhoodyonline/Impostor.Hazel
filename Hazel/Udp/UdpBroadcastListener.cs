@@ -3,9 +3,8 @@ using System.Collections.Generic;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
-using System.Threading;
 
-namespace Hazel.Udp
+namespace Impostor.Hazel.Udp
 {
     public class BroadcastPacket
     {

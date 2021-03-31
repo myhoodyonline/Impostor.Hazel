@@ -1,9 +1,6 @@
 ﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
 
-namespace Hazel
+namespace Impostor.Hazel
 {
     /// <summary>
     ///     Specifies how a message should be sent between connections.

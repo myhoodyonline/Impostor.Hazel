@@ -1,8 +1,7 @@
-using Hazel.Crypto;
-using System;
 using System.Diagnostics;
+using Impostor.Hazel.Crypto;
 
-namespace Hazel.Dtls
+namespace Impostor.Hazel.Dtls
 {
     /// <summary>
     /// *_AES_128_GCM_* cipher suite

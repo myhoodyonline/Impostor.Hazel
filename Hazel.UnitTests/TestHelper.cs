@@ -5,7 +5,9 @@ using Hazel;
 using System.Net;
 using System.Threading;
 using System.Diagnostics;
-using Hazel.Udp.FewerThreads;
+using Impostor.Hazel;
+using Impostor.Hazel.FewerThreads;
+using DataReceivedEventArgs = Impostor.Hazel.DataReceivedEventArgs;
 
 namespace Hazel.UnitTests
 {

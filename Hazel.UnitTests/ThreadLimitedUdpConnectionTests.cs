@@ -2,9 +2,11 @@ using System;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using System.Net;
 using System.Threading;
-using Hazel.Udp;
-using Hazel.Udp.FewerThreads;
 using System.Net.Sockets;
+using Impostor.Hazel;
+using Impostor.Hazel.FewerThreads;
+using Impostor.Hazel.Udp;
+using Impostor.Hazel.UPnP;
 
 namespace Hazel.UnitTests
 {

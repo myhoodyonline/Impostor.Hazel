@@ -1,11 +1,11 @@
 ﻿using System;
 using System.IO;
-using System.Xml;
 using System.Net;
 using System.Net.Sockets;
 using System.Threading;
+using System.Xml;
 
-namespace Hazel.UPnP
+namespace Impostor.Hazel.UPnP
 {
     /// <summary>
     /// Status of the UPnP capabilities

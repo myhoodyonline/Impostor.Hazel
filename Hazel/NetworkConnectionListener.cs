@@ -1,11 +1,6 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Net;
-using System.Text;
+﻿using System.Net;
 
-
-namespace Hazel
+namespace Impostor.Hazel
 {
     /// <summary>
     ///     Abstract base class for a <see cref="ConnectionListener"/> for network based connections.

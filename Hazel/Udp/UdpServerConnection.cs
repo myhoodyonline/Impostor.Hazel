@@ -1,7 +1,7 @@
 using System;
 using System.Net;
 
-namespace Hazel.Udp
+namespace Impostor.Hazel.Udp
 {
     /// <summary>
     ///     Represents a servers's connection to a client that uses the UDP protocol.

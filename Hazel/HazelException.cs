@@ -1,9 +1,6 @@
 ﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
 
-namespace Hazel
+namespace Impostor.Hazel
 {
     /// <summary>
     ///     Wrapper for exceptions thrown from Hazel.

@@ -1,6 +1,7 @@
-using Hazel.Crypto;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using System.Text;
+using Impostor.Hazel;
+using Impostor.Hazel.Crypto;
 
 namespace Hazel.UnitTests.Crypto
 {

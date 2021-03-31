@@ -1,6 +1,6 @@
 ﻿using System;
 
-namespace Hazel
+namespace Impostor.Hazel
 {
     /// <summary>
     ///     Base class for all connection listeners.

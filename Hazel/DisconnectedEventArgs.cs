@@ -1,6 +1,6 @@
 ﻿using System;
 
-namespace Hazel
+namespace Impostor.Hazel
 {
     public class DisconnectedEventArgs : EventArgs
     {

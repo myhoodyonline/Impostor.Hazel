@@ -1,6 +1,7 @@
-using Hazel.Dtls;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using System.Security.Cryptography;
+using Impostor.Hazel;
+using Impostor.Hazel.Dtls;
 
 namespace Hazel.UnitTests.Dtls
 {

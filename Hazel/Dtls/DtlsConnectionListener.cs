@@ -7,10 +7,11 @@ using System.Net;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Threading;
-using Hazel.Udp.FewerThreads;
-using Hazel.Crypto;
+using Impostor.Hazel.Crypto;
+using Impostor.Hazel.FewerThreads;
+using Impostor.Hazel.UPnP;
 
-namespace Hazel.Dtls
+namespace Impostor.Hazel.Dtls
 {
     /// <summary>
     /// Listens for new UDP-DTLS connections and creates UdpConnections for them.

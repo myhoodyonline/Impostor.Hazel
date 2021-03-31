@@ -1,11 +1,12 @@
 using System;
 using System.Collections.Concurrent;
-using System.Collections.Generic;
 using System.Net;
 using System.Net.Sockets;
 using System.Threading;
+using Impostor.Hazel.Udp;
+using Impostor.Hazel.UPnP;
 
-namespace Hazel.Udp.FewerThreads
+namespace Impostor.Hazel.FewerThreads
 {
     /// <summary>
     ///     Listens for new UDP connections and creates UdpConnections for them.

@@ -1,5 +1,5 @@
 ﻿using System;
-using Hazel.UPnP;
+using Impostor.Hazel.UPnP;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 
 namespace Hazel.UnitTests

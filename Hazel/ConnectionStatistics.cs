@@ -1,11 +1,6 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading;
+﻿using System.Threading;
 
-
-namespace Hazel
+namespace Impostor.Hazel
 {
     /// <summary>
     ///     Holds statistics about the traffic through a <see cref="Connection"/>.

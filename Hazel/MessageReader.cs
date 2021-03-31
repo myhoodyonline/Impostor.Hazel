@@ -1,10 +1,9 @@
 ﻿using System;
 using System.IO;
-using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Text;
 
-namespace Hazel
+namespace Impostor.Hazel
 {
     public class MessageReader : IRecyclable
     {
