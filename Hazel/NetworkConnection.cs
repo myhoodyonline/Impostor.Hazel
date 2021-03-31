@@ -29,7 +29,9 @@ namespace Impostor.Hazel
         {
             if (IPMode == IPMode.IPv4)
             {
+#pragma warning disable 618
                 return this.EndPoint.Address.Address;
+#pragma warning restore 618
             }
             else
             {
