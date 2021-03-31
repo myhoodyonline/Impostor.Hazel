@@ -72,16 +72,13 @@ IsdbLCwHYD3GVgk/D7NVxyU=
         private static X509Certificate2 GetCertificateForServer()
         {
             RSA privateKey = Utils.DecodeRSAKeyFromPEM(TestPrivateKey);
-            X509Certificate2 privateCertificate = new X509Certificate2();
-            privateCertificate.Import(Utils.DecodePEM(TestCertificate));
-            privateCertificate.PrivateKey = privateKey;
+            X509Certificate2 privateCertificate = new X509Certificate2(Utils.DecodePEM(TestCertificate)).CopyWithPrivateKey(privateKey);
             return privateCertificate;
         }
 
         private static X509Certificate2Collection GetCertificateForClient()
         {
-            X509Certificate2 publicCertificate = new X509Certificate2();
-            publicCertificate.Import(Utils.DecodePEM(TestCertificate));
+            X509Certificate2 publicCertificate = new X509Certificate2(Utils.DecodePEM(TestCertificate));
 
             X509Certificate2Collection clientCertificates = new X509Certificate2Collection();
             clientCertificates.Add(publicCertificate);

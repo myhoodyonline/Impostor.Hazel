@@ -87,11 +87,18 @@ namespace Hazel.UnitTests
             return result.ToArray();
         }
 
+        private static RSA CreateRSAProvider(RSAParameters rp)
+        {
+            RSACryptoServiceProvider rsaCsp = new RSACryptoServiceProvider();
+            rsaCsp.ImportParameters(rp);
+            return rsaCsp;
+        }
+
         public static RSA DecodeRSAKeyFromPEM(string pemData)
         {
             PemReader pemReader = new PemReader(new StringReader(pemData));
             RsaPrivateCrtKeyParameters keyParameters = (RsaPrivateCrtKeyParameters)pemReader.ReadObject();
-            return DotNetUtilities.ToRSA(keyParameters);
+            return CreateRSAProvider(DotNetUtilities.ToRSAParameters(keyParameters));
         }
     }
 }
