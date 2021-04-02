@@ -1,5 +1,8 @@
 ﻿using System;
 using System.Net;
+using System.Threading.Tasks;
+using Impostor.Api.Net.Messages;
+using Serilog;
 
 namespace Impostor.Hazel
 {
@@ -29,6 +32,8 @@ namespace Impostor.Hazel
     /// <threadsafety static="true" instance="true"/>
     public abstract class Connection : IDisposable
     {
+        private static readonly ILogger Logger = Log.ForContext<Connection>();
+
         /// <summary>
         ///     Called when a message has been received.
         /// </summary>
@@ -43,7 +48,7 @@ namespace Impostor.Hazel
         /// <example>
         ///     <code language="C#" source="DocInclude/TcpClientExample.cs"/>
         /// </example>
-        public event Action<DataReceivedEventArgs> DataReceived;
+        public Func<DataReceivedEventArgs, ValueTask> DataReceived;
 
         public int TestLagMs = -1;
         public int TestDropRate = 0;
@@ -63,7 +68,7 @@ namespace Impostor.Hazel
         /// <example>
         ///     <code language="C#" source="DocInclude/TcpClientExample.cs"/>
         /// </example>
-        public event EventHandler<DisconnectedEventArgs> Disconnected;
+        public Func<DisconnectedEventArgs, ValueTask> Disconnected;
 
         /// <summary>
         ///     The remote end point of this Connection.
@@ -134,7 +139,7 @@ namespace Impostor.Hazel
         ///         general any implementer should aim to always follow the user's request.
         ///     </para>
         /// </remarks>
-        public abstract void Send(MessageWriter msg);
+        public abstract ValueTask SendAsync(IMessageWriter msg);
 
         /// <summary>
         ///     Sends a number of bytes to the end point of the connection using the specified <see cref="SendOption"/>.
@@ -149,7 +154,7 @@ namespace Impostor.Hazel
         ///         general any implementer should aim to always follow the user's request.
         ///     </para>
         /// </remarks>
-        public abstract void SendBytes(byte[] bytes, SendOption sendOption = SendOption.None);
+        public abstract ValueTask SendBytes(byte[] bytes, MessageType sendOption = MessageType.Unreliable);
         
         /// <summary>
         ///     Connects the connection to a server and begins listening.
@@ -157,14 +162,7 @@ namespace Impostor.Hazel
         /// </summary>
         /// <param name="bytes">The bytes of data to send in the handshake.</param>
         /// <param name="timeout">The number of milliseconds to wait before giving up on the connect attempt.</param>
-        public abstract void Connect(byte[] bytes = null, int timeout = 5000);
-
-        /// <summary>
-        ///     Connects the connection to a server and begins listening.
-        ///     This method does not block.
-        /// </summary>
-        /// <param name="bytes">The bytes of data to send in the handshake.</param>
-        public abstract void ConnectAsync(byte[] bytes = null);
+        public abstract ValueTask ConnectAsync(byte[] bytes = null, int timeout = 5000);
 
         /// <summary>
         ///     Invokes the DataReceived event.
@@ -176,21 +174,21 @@ namespace Impostor.Hazel
         ///     received. The bytes and the send option that the message was sent with should be passed in to give to the
         ///     subscribers.
         /// </remarks>
-        protected void InvokeDataReceived(MessageReader msg, SendOption sendOption)
+        protected async ValueTask InvokeDataReceived(MessageReader msg, MessageType messageType)
         {
             // Make a copy to avoid race condition between null check and invocation
-            Action<DataReceivedEventArgs> handler = DataReceived;
+            var handler = DataReceived;
             if (handler != null)
             {
                 try
                 {
-                    handler(new DataReceivedEventArgs(this, msg, sendOption));
+                    await handler(new DataReceivedEventArgs(this, msg, messageType));
                 }
-                catch { }
-            }
-            else
-            {
-                msg.Recycle();
+                catch (Exception e)
+                {
+                    Logger.Error(e, "Invoking data received failed");
+                    await Disconnect("Invoking data received failed");
+                }
             }
         }
 
@@ -204,19 +202,19 @@ namespace Impostor.Hazel
         ///     by the end point or because an error occurred. If an error occurred the error should be passed in in order to 
         ///     pass to the subscribers, otherwise null can be passed in.
         /// </remarks>
-        protected void InvokeDisconnected(string e, MessageReader reader)
+        protected async ValueTask InvokeDisconnected(string e, MessageReader reader)
         {
             // Make a copy to avoid race condition between null check and invocation
-            EventHandler<DisconnectedEventArgs> handler = Disconnected;
+            var handler = Disconnected;
             if (handler != null)
             {
-                DisconnectedEventArgs args = new DisconnectedEventArgs(e, reader);
                 try
                 {
-                    handler(this, args);
+                    await handler(new DisconnectedEventArgs(e, reader));
                 }
-                catch
+                catch (Exception ex)
                 {
+                    Logger.Error(ex, "Error in InvokeDisconnected");
                 }
             }
         }
@@ -225,7 +223,7 @@ namespace Impostor.Hazel
         /// For times when you want to force the disconnect handler to fire as well as close it.
         /// If you only want to close it, just use Dispose.
         /// </summary>
-        public abstract void Disconnect(string reason, MessageWriter writer = null);
+        public abstract ValueTask Disconnect(string reason, MessageWriter writer = null);
         
         /// <summary>
         ///     Disposes of this NetworkConnection.

@@ -1,198 +1,105 @@
 ﻿using System;
-using System.IO;
+using System.Buffers.Binary;
+using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Text;
+using Impostor.Api;
+using Impostor.Api.Games;
+using Impostor.Api.Net.Inner;
+using Impostor.Api.Net.Messages;
+using Impostor.Api.Unity;
+using Microsoft.Extensions.ObjectPool;
 
 namespace Impostor.Hazel
 {
-    public class MessageReader : IRecyclable
+    public class MessageReader : IMessageReader
     {
-        public static readonly ObjectPool<MessageReader> ReaderPool = new ObjectPool<MessageReader>(() => new MessageReader());
+        private readonly ObjectPool<MessageReader> _pool;
+        private bool _inUse;
 
-        public byte[] Buffer;
-        public byte Tag;
+        internal MessageReader(ObjectPool<MessageReader> pool)
+        {
+            _pool = pool;
+        }
 
-        public int Length;
-        public int Offset;
+        public byte[] Buffer { get; private set; }
 
+        public int Offset { get; internal set; }
+
+        public int Position { get; internal set; }
+
+        public int Length { get; internal set; }
+        
         public int BytesRemaining => this.Length - this.Position;
 
-        private MessageReader Parent;
+        public byte Tag { get; private set; }
 
-        public int Position
+        public MessageReader Parent { get; private set; }
+
+        private int ReadPosition => Offset + Position;
+        public void Update(byte[] buffer, int offset = 0, int position = 0, int? length = null, byte tag = byte.MaxValue, MessageReader parent = null)
         {
-            get { return this._position; }
-            set
+            _inUse = true;
+
+            Buffer = buffer;
+            Offset = offset;
+            Position = position;
+            Length = length ?? buffer.Length;
+            Tag = tag;
+            Parent = parent;
+        }
+
+        internal void Reset()
+        {
+            _inUse = false;
+
+            Tag = byte.MaxValue;
+            Buffer = null;
+            Offset = 0;
+            Position = 0;
+            Length = 0;
+            Parent = null;
+        }
+
+        public IMessageReader ReadMessage()
+        {
+            var length = ReadUInt16();
+            var tag = FastByte();
+            var pos = ReadPosition;
+
+            Position += length;
+
+            var reader = _pool.Get();
+            reader.Update(Buffer, pos, 0, length, tag, this);
+            return reader;
+        }
+
+        public void RemoveMessage(IMessageReader message)
+        {
+            if (message.Buffer != Buffer)
             {
-                this._position = value;
-                this.readHead = value + Offset;
-            }
-        }
-
-        private int _position;
-        private int readHead;
-
-        public static MessageReader GetSized(int minSize)
-        {
-            var output = ReaderPool.GetObject();
-
-            if (output.Buffer == null || output.Buffer.Length < minSize)
-            {
-                output.Buffer = new byte[minSize];
-            }
-            else
-            {
-                Array.Clear(output.Buffer, 0, output.Buffer.Length);
+                throw new ImpostorProtocolException("Tried to remove message from a message that does not have the same buffer.");
             }
 
-            output.Offset = 0;
-            output.Position = 0;
-            output.Tag = byte.MaxValue;
-            return output;
-        }
+            // Offset of where to start removing.
+            var offsetStart = message.Offset - 3;
 
-        public static MessageReader Get(byte[] buffer)
-        {
-            var output = ReaderPool.GetObject();
+            // Offset of where to end removing.
+            var offsetEnd = message.Offset + message.Length;
 
-            output.Buffer = buffer;
-            output.Offset = 0;
-            output.Position = 0;
-            output.Length = buffer.Length;
-            output.Tag = byte.MaxValue;
+            // The amount of bytes to copy over ourselves.
+            var lengthToCopy = message.Buffer.Length - offsetEnd;
 
-            return output;
-        }
+            System.Buffer.BlockCopy(Buffer, offsetEnd, Buffer, offsetStart, lengthToCopy);
 
-        public static MessageReader CopyMessageIntoParent(MessageReader source)
-        {
-            var output = MessageReader.GetSized(source.Length + 3);
-            System.Buffer.BlockCopy(source.Buffer, source.Offset - 3, output.Buffer, 0, source.Length + 3);
-
-            output.Offset = 0;
-            output.Position = 0;
-            output.Length = source.Length + 3;
-
-            return output;
-        }
-
-        public static MessageReader Get(MessageReader source)
-        {
-            var output = MessageReader.GetSized(source.Buffer.Length);
-            System.Buffer.BlockCopy(source.Buffer, 0, output.Buffer, 0, source.Buffer.Length);
-
-            output.Offset = source.Offset;
-
-            output._position = source._position;
-            output.readHead = source.readHead;
-
-            output.Length = source.Length;
-            output.Tag = source.Tag;
-
-            return output;
-        }
-
-        public static MessageReader Get(byte[] buffer, int offset)
-        {
-            // Ensure there is at least a header
-            if (offset + 3 > buffer.Length) return null;
-
-            var output = ReaderPool.GetObject();
-
-            output.Buffer = buffer;
-            output.Offset = offset;
-            output.Position = 0;
-
-            output.Length = output.ReadUInt16();
-            output.Tag = output.ReadByte();
-
-            output.Offset += 3;
-            output.Position = 0;
-
-            return output;
-        }
-
-        /// <summary>
-        /// Produces a MessageReader using the parent's buffer. This MessageReader should **NOT** be recycled.
-        /// </summary>
-        public MessageReader ReadMessage()
-        {
-            // Ensure there is at least a header
-            if (this.BytesRemaining < 3) throw new InvalidDataException($"ReadMessage header is longer than message length: 3 of {this.BytesRemaining}");
-
-            var output = new MessageReader();
-
-            output.Parent = this;
-            output.Buffer = this.Buffer;
-            output.Offset = this.readHead;
-            output.Position = 0;
-
-            output.Length = output.ReadUInt16();
-            output.Tag = output.ReadByte();
-
-            output.Offset += 3;
-            output.Position = 0;
-
-            if (this.BytesRemaining < output.Length + 3) throw new InvalidDataException($"Message Length at Position {this.readHead} is longer than message length: {output.Length + 3} of {this.BytesRemaining}");
-
-            this.Position += output.Length + 3;
-            return output;
-        }
-
-        /// <summary>
-        /// Produces a MessageReader with a new buffer. This MessageReader should be recycled.
-        /// </summary>
-        public MessageReader ReadMessageAsNewBuffer()
-        {
-            if (this.BytesRemaining < 3) throw new InvalidDataException($"ReadMessage header is longer than message length: 3 of {this.BytesRemaining}");
-
-            var len = this.ReadUInt16();
-            var tag = this.ReadByte();
-
-            if (this.BytesRemaining < len) throw new InvalidDataException($"Message Length at Position {this.readHead} is longer than message length: {len} of {this.BytesRemaining}");
-
-            var output = MessageReader.GetSized(len);
-
-            output.Parent = this;
-            Array.Copy(this.Buffer, this.readHead, output.Buffer, 0, len);
-
-            output.Length = len;
-            output.Tag = tag;
-
-            this.Position += output.Length;
-            return output;
-        }
-
-        public MessageWriter StartWriter()
-        {
-            var output = new MessageWriter(this.Buffer);
-            output.Position = this.readHead;
-            return output;
-        }
-
-        public void RemoveMessage(MessageReader reader)
-        {
-            var temp = MessageReader.GetSized(reader.Buffer.Length);
-            try
-            {
-                var headerOffset = reader.Offset - 3;
-                var endOfMessage = reader.Offset + reader.Length;
-                var len = reader.Buffer.Length - endOfMessage;
-
-                Array.Copy(reader.Buffer, endOfMessage, temp.Buffer, 0, len);
-                Array.Copy(temp.Buffer, 0, this.Buffer, headerOffset, len);
-
-                this.AdjustLength(reader.Offset, reader.Length + 3);
-            }
-            finally
-            {
-                temp.Recycle();
-            }
+            ((MessageReader) message).Parent.AdjustLength(message.Offset, message.Length + 3);
         }
 
         private void AdjustLength(int offset, int amount)
         {
-            if (this.readHead > offset)
+            this.Length -= amount;
+
+            if (this.ReadPosition > offset)
             {
                 this.Position -= amount;
             }
@@ -200,11 +107,10 @@ namespace Impostor.Hazel
             if (Parent != null)
             {
                 var lengthOffset = this.Offset - 3;
-                var curLen = this.Buffer[lengthOffset]
-                    | (this.Buffer[lengthOffset + 1] << 8);
+                var curLen = this.Buffer[lengthOffset] |
+                             (this.Buffer[lengthOffset + 1] << 8);
 
                 curLen -= amount;
-                this.Length -= amount;
 
                 this.Buffer[lengthOffset] = (byte)curLen;
                 this.Buffer[lengthOffset + 1] = (byte)(this.Buffer[lengthOffset + 1] >> 8);
@@ -213,10 +119,12 @@ namespace Impostor.Hazel
             }
         }
 
-        public void Recycle()
+        public void Dispose()
         {
-            this.Parent = null;
-            ReaderPool.PutObject(this);
+            if (_inUse)
+            {
+                _pool.Return(this);
+            }
         }
 
         #region Read Methods
@@ -238,83 +146,61 @@ namespace Impostor.Hazel
 
         public ushort ReadUInt16()
         {
-            ushort output =
-                (ushort)(this.FastByte()
-                | this.FastByte() << 8);
+            var output = BinaryPrimitives.ReadUInt16LittleEndian(Buffer.AsSpan(ReadPosition));
+            Position += sizeof(ushort);
             return output;
         }
 
         public short ReadInt16()
         {
-            short output =
-                (short)(this.FastByte()
-                | this.FastByte() << 8);
+            var output = BinaryPrimitives.ReadInt16LittleEndian(Buffer.AsSpan(ReadPosition));
+            Position += sizeof(short);
             return output;
         }
 
         public uint ReadUInt32()
         {
-            uint output = this.FastByte()
-                | (uint)this.FastByte() << 8
-                | (uint)this.FastByte() << 16
-                | (uint)this.FastByte() << 24;
-
+            var output = BinaryPrimitives.ReadUInt32LittleEndian(Buffer.AsSpan(ReadPosition));
+            Position += sizeof(uint);
             return output;
         }
 
         public int ReadInt32()
         {
-            int output = this.FastByte()
-                | this.FastByte() << 8
-                | this.FastByte() << 16
-                | this.FastByte() << 24;
-
+            var output = BinaryPrimitives.ReadInt32LittleEndian(Buffer.AsSpan(ReadPosition));
+            Position += sizeof(int);
             return output;
         }
 
         public unsafe float ReadSingle()
         {
-            float output = 0;
-            fixed (byte* bufPtr = &this.Buffer[this.readHead])
-            {
-                byte* outPtr = (byte*)&output;
+            var output = BinaryPrimitives.ReadSingleLittleEndian(Buffer.AsSpan(ReadPosition));
+            Position += sizeof(float);
+            return output;
+        }
 
-                *outPtr = *bufPtr;
-                *(outPtr + 1) = *(bufPtr + 1);
-                *(outPtr + 2) = *(bufPtr + 2);
-                *(outPtr + 3) = *(bufPtr + 3);
-            }
-
-            this.Position += 4;
+        public string ReadString(int length)
+        {
+            var output = Encoding.UTF8.GetString(Buffer.AsSpan(ReadPosition, length));
+            Position += length;
             return output;
         }
 
         public string ReadString()
         {
-            int len = this.ReadPackedInt32();
-            if (this.BytesRemaining < len) throw new InvalidDataException($"Read length is longer than message length: {len} of {this.BytesRemaining}");
-
-            string output = UTF8Encoding.UTF8.GetString(this.Buffer, this.readHead, len);
-
-            this.Position += len;
-            return output;
+            return ReadString(ReadPackedInt32());
         }
 
-        public byte[] ReadBytesAndSize()
+        public ReadOnlyMemory<byte> ReadBytesAndSize()
         {
-            int len = this.ReadPackedInt32();
-            if (this.BytesRemaining < len) throw new InvalidDataException($"Read length is longer than message length: {len} of {this.BytesRemaining}");
-
-            return this.ReadBytes(len);
+            var len = ReadPackedInt32();
+            return ReadBytes(len);
         }
 
-        public byte[] ReadBytes(int length)
+        public ReadOnlyMemory<byte> ReadBytes(int length)
         {
-            if (this.BytesRemaining < length) throw new InvalidDataException($"Read length is longer than message length: {length} of {this.BytesRemaining}");
-
-            byte[] output = new byte[length];
-            Array.Copy(this.Buffer, this.readHead, output, 0, output.Length);
-            this.Position += output.Length;
+            var output = Buffer.AsMemory(ReadPosition, length);
+            Position += length;
             return output;
         }
 
@@ -333,9 +219,7 @@ namespace Impostor.Hazel
 
             while (readMore)
             {
-                if (this.BytesRemaining < 1) throw new InvalidDataException($"Read length is longer than message length.");
-
-                byte b = this.ReadByte();
+                byte b = FastByte();
                 if (b >= 0x80)
                 {
                     readMore = true;
@@ -352,26 +236,47 @@ namespace Impostor.Hazel
 
             return output;
         }
+
+        public T ReadNetObject<T>(IGame game) where T : IInnerNetObject
+        {
+            return game.FindObjectByNetId<T>(ReadPackedUInt32());
+        }
+
+        public Vector2 ReadVector2()
+        {
+            const float range = 50f;
+
+            var x = ReadUInt16() / (float)ushort.MaxValue;
+            var y = ReadUInt16() / (float)ushort.MaxValue;
+
+            return new Vector2(Mathf.Lerp(-range, range, x), Mathf.Lerp(-range, range, y));
+        }
+
         #endregion
+
+        public void CopyTo(IMessageWriter writer)
+        {
+            writer.Write((ushort)Length);
+            writer.Write((byte)Tag);
+            writer.Write(Buffer.AsMemory(Offset, Length));
+        }
+
+        public IMessageReader Copy(int offset = 0)
+        {
+            var reader = _pool.Get();
+            reader.Update(Buffer, Offset + offset, Position, Length - offset, Tag, Parent);
+            return reader;
+        }
+
+        public void Seek(int position)
+        {
+            Position = position;
+        }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private byte FastByte()
         {
-            this._position++;
-            return this.Buffer[this.readHead++];
-        }
-
-        public unsafe static bool IsLittleEndian()
-        {
-            byte b;
-            unsafe
-            {
-                int i = 1;
-                byte* bp = (byte*)&i;
-                b = *bp;
-            }
-
-            return b == 1;
+            return Buffer[Offset + Position++];
         }
     }
 }

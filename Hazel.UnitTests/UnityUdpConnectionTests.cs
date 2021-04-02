@@ -444,10 +444,10 @@ namespace Hazel.UnitTests
         ///     Tests disconnection from the server.
         /// </summary>
         [TestMethod]
-        public void ServerExtraDataDisconnectTest()
+        public async Task ServerExtraDataDisconnectTest()
         {
             using (UdpConnectionListener listener = new UdpConnectionListener(new IPEndPoint(IPAddress.Any, 4296)))
-            using (UdpConnection connection = new UnityUdpClientConnection(new IPEndPoint(IPAddress.Loopback, 4296)))
+            using (UdpConnection connection = new UdpClientConnection(new IPEndPoint(IPAddress.Loopback, 4296)))
             {
                 MessageReader received = null;
                 ManualResetEvent mutex = new ManualResetEvent(false);
@@ -465,9 +465,9 @@ namespace Hazel.UnitTests
                     args.Connection.Disconnect("Testing", writer);
                 };
 
-                listener.Start();
+                await listener.StartAsync();
 
-                connection.Connect();
+                await connection.ConnectAsync();
 
                 mutex.WaitOne();
 

@@ -4,12 +4,15 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Net;
+using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Threading;
+using System.Threading.Tasks;
 using Impostor.Hazel.Crypto;
-using Impostor.Hazel.FewerThreads;
-using Impostor.Hazel.UPnP;
+using Impostor.Hazel.Udp;
+using Microsoft.Extensions.ObjectPool;
+using Serilog;
 
 namespace Impostor.Hazel.Dtls
 {
@@ -17,8 +20,10 @@ namespace Impostor.Hazel.Dtls
     /// Listens for new UDP-DTLS connections and creates UdpConnections for them.
     /// </summary>
     /// <inheritdoc />
-    public class DtlsConnectionListener : ThreadLimitedUdpConnectionListener
+    public class DtlsConnectionListener : UdpConnectionListener
     {
+        private static readonly ILogger Logger = Log.ForContext<DtlsConnectionListener>();
+
         const int MaxDatagramSize = 1200;
 
         /// <summary>
@@ -75,7 +80,6 @@ namespace Impostor.Hazel.Dtls
 
             public ByteSpan ClientVerification;
             public ByteSpan ServerVerification;
-
         }
 
         /// <summary>
@@ -87,7 +91,7 @@ namespace Impostor.Hazel.Dtls
             public bool CanHandleApplicationData;
 
             public CurrentEpoch CurrentEpoch;
-            public NextEpoch  NextEpoch;
+            public NextEpoch NextEpoch;
 
             public ConnectionId ConnectionId;
 
@@ -95,13 +99,15 @@ namespace Impostor.Hazel.Dtls
 
             public DateTime StartOfNegotiation;
 
+            public SemaphoreSlim Semaphore = new SemaphoreSlim(1, 1);
+
             public PeerData()
             {
                 ByteSpan block = new byte[2 * Finished.Size];
                 this.CurrentEpoch.ServerFinishedVerification = block.Slice(0, Finished.Size);
                 this.CurrentEpoch.ExpectedClientFinishedVerification = block.Slice(Finished.Size, Finished.Size);
 
-                ResetPeer(ConnectionId.Create(new IPEndPoint(0,0), 0), 1);
+                ResetPeer(ConnectionId.Create(new IPEndPoint(0, 0), 0), 1);
             }
 
             public void ResetPeer(ConnectionId connectionId, ulong nextExpectedSequenceNumber)
@@ -158,17 +164,16 @@ namespace Impostor.Hazel.Dtls
 
         private readonly ConcurrentDictionary<IPEndPoint, PeerData> existingPeers = new ConcurrentDictionary<IPEndPoint, PeerData>();
 
-        private int connectionSerial_unsafe =  0;
+        private int connectionSerial_unsafe = 0;
 
         /// <summary>
         /// Create a new instance of the DTLS listener
         /// </summary>
-        /// <param name="numWorkers"></param>
         /// <param name="endPoint"></param>
-        /// <param name="logger"></param>
         /// <param name="ipMode"></param>
-        public DtlsConnectionListener(int numWorkers, IPEndPoint endPoint, ILogger logger, IPMode ipMode = IPMode.IPv4)
-            : base(numWorkers, endPoint, logger, ipMode)
+        /// <param name="readerPool"></param>
+        public DtlsConnectionListener(IPEndPoint endPoint, ObjectPool<MessageReader> readerPool, IPMode ipMode = IPMode.IPv4)
+            : base(endPoint, readerPool, ipMode)
         {
             this.random = RandomNumberGenerator.Create();
 
@@ -177,10 +182,98 @@ namespace Impostor.Hazel.Dtls
             this.nextCookieHmacRotation = DateTime.UtcNow + CookieHmacRotationTimeout;
         }
 
-        /// <inheritdoc />
-        protected override void Dispose(bool disposing)
+        internal async ValueTask SendData(ByteSpan span, IPEndPoint endPoint)
         {
-            base.Dispose(disposing);
+            var array = span.ToArray();
+            await base.SendData(array, array.Length, endPoint);
+        }
+
+        internal override async ValueTask SendData(byte[] bytes, int length, IPEndPoint remoteEndPoint)
+        {
+            var span = new ByteSpan(bytes);
+
+            PeerData peer;
+            if (!this.existingPeers.TryGetValue(remoteEndPoint, out peer))
+            {
+                Logger.Warning("Peer not found");
+                // Drop messages if we don't know how to send them
+                return;
+            }
+
+            await peer.Semaphore.WaitAsync();
+            {
+                // If we're negotiating a new epoch, queue data
+                if (peer.Epoch == 0 || peer.NextEpoch.State != HandshakeState.ExpectingHello)
+                {
+                    ByteSpan copyOfSpan = new byte[span.Length];
+                    span.CopyTo(copyOfSpan);
+
+                    peer.QueuedApplicationDataMessage.Add(copyOfSpan);
+                    return;
+                }
+
+                // Send any queued application data now
+                for (int ii = 0, nn = peer.QueuedApplicationDataMessage.Count; ii != nn; ++ii)
+                {
+                    ByteSpan queuedSpan = peer.QueuedApplicationDataMessage[ii];
+
+                    Record outgoingRecord = new Record();
+                    outgoingRecord.ContentType = ContentType.ApplicationData;
+                    outgoingRecord.Epoch = peer.Epoch;
+                    outgoingRecord.SequenceNumber = peer.CurrentEpoch.NextOutgoingSequence;
+                    outgoingRecord.Length = (ushort)peer.CurrentEpoch.RecordProtection.GetEncryptedSize(queuedSpan.Length);
+                    ++peer.CurrentEpoch.NextOutgoingSequence;
+
+                    // Encode the record to wire format
+                    ByteSpan packet = new byte[Record.Size + outgoingRecord.Length];
+                    ByteSpan writer = packet;
+                    outgoingRecord.Encode(writer);
+                    writer = writer.Slice(Record.Size);
+                    queuedSpan.CopyTo(writer);
+
+                    // Protect the record
+                    peer.CurrentEpoch.RecordProtection.EncryptServerPlaintext(
+                        packet.Slice(Record.Size, outgoingRecord.Length)
+                        , packet.Slice(Record.Size, queuedSpan.Length)
+                        , ref outgoingRecord);
+
+                    await this.SendData(packet, remoteEndPoint);
+                }
+
+                peer.QueuedApplicationDataMessage.Clear();
+
+                {
+                    Record outgoingRecord = new Record();
+                    outgoingRecord.ContentType = ContentType.ApplicationData;
+                    outgoingRecord.Epoch = peer.Epoch;
+                    outgoingRecord.SequenceNumber = peer.CurrentEpoch.NextOutgoingSequence;
+                    outgoingRecord.Length = (ushort)peer.CurrentEpoch.RecordProtection.GetEncryptedSize(span.Length);
+                    ++peer.CurrentEpoch.NextOutgoingSequence;
+
+                    // Encode the record to wire format
+                    ByteSpan packet = new byte[Record.Size + outgoingRecord.Length];
+                    ByteSpan writer = packet;
+                    outgoingRecord.Encode(writer);
+                    writer = writer.Slice(Record.Size);
+                    span.CopyTo(writer);
+
+                    // Protect the record
+                    peer.CurrentEpoch.RecordProtection.EncryptServerPlaintext(
+                        packet.Slice(Record.Size, outgoingRecord.Length)
+                        , packet.Slice(Record.Size, span.Length)
+                        , ref outgoingRecord
+                    );
+
+                    await this.SendData(packet, remoteEndPoint);
+                }
+            }
+            peer.Semaphore.Release();
+        }
+
+        /// <inheritdoc />
+        public override async ValueTask DisposeAsync()
+        {
+            await base.DisposeAsync();
 
             this.random?.Dispose();
             this.random = null;
@@ -194,6 +287,7 @@ namespace Impostor.Hazel.Dtls
             {
                 pair.Value.Dispose();
             }
+
             this.existingPeers.Clear();
         }
 
@@ -247,26 +341,25 @@ namespace Impostor.Hazel.Dtls
         /// This is primarily a wrapper around ProcessIncomingMessage
         /// to ensure `reader.Recycle()` is always called
         /// </summary>
-        protected override void ProcessIncomingMessageFromOtherThread(MessageReader reader, IPEndPoint peerAddress, ConnectionId connectionId)
+        protected override ValueTask ProcessData(UdpReceiveResult data)
         {
-            ByteSpan message = new ByteSpan(reader.Buffer, reader.Offset + reader.Position, reader.BytesRemaining);
-            this.ProcessIncomingMessage(message, peerAddress);
-            reader.Recycle();
+            ByteSpan message = new ByteSpan(data.Buffer);
+            return this.ProcessIncomingMessage(message, data.RemoteEndPoint);
         }
 
         /// <summary>
         /// Handle an incoming datagram from the network
         /// </summary>
-        private void ProcessIncomingMessage(ByteSpan message, IPEndPoint peerAddress)
+        private async ValueTask ProcessIncomingMessage(ByteSpan message, IPEndPoint peerAddress)
         {
             PeerData peer = null;
             if (!this.existingPeers.TryGetValue(peerAddress, out peer))
             {
-                HandleNonPeerRecord(message, peerAddress);
+                await HandleNonPeerRecord(message, peerAddress);
                 return;
             }
 
-            lock (peer)
+            await peer.Semaphore.WaitAsync();
             {
                 // Each incoming packet may contain multiple DTLS
                 // records
@@ -275,14 +368,15 @@ namespace Impostor.Hazel.Dtls
                     Record record;
                     if (!Record.Parse(out record, message))
                     {
-                        this.Logger.WriteError($"Dropping malformed record from `{peerAddress}`");
+                        Logger.Error($"Dropping malformed record from `{peerAddress}`");
                         return;
                     }
+
                     message = message.Slice(Record.Size);
 
                     if (message.Length < record.Length)
                     {
-                        this.Logger.WriteError($"Dropping malformed record from `{peerAddress}` Length({record.Length}) AvailableBytes({message.Length})");
+                        Logger.Error($"Dropping malformed record from `{peerAddress}` Length({record.Length}) AvailableBytes({message.Length})");
                         return;
                     }
 
@@ -292,7 +386,7 @@ namespace Impostor.Hazel.Dtls
                     // Early-out and drop ApplicationData records
                     if (record.ContentType == ContentType.ApplicationData && !peer.CanHandleApplicationData)
                     {
-                        this.Logger.WriteInfo($"Dropping ApplicationData record from `{peerAddress}` Cannot process yet");
+                        Logger.Information($"Dropping ApplicationData record from `{peerAddress}` Cannot process yet");
                         continue;
                     }
 
@@ -307,34 +401,35 @@ namespace Impostor.Hazel.Dtls
                             Handshake handshake;
                             if (!Handshake.Parse(out handshake, recordPayload))
                             {
-                                this.Logger.WriteError($"Dropping malformed re-negotiation Handshake from `{peerAddress}`");
+                                Logger.Error($"Dropping malformed re-negotiation Handshake from `{peerAddress}`");
                                 continue;
                             }
+
                             handshakePayload = handshakePayload.Slice(Handshake.Size);
 
                             if (handshake.FragmentOffset != 0 || handshake.Length != handshake.FragmentLength)
                             {
-                                this.Logger.WriteError($"Dropping fragmented re-negotiation Handshake from `{peerAddress}`");
+                                Logger.Error($"Dropping fragmented re-negotiation Handshake from `{peerAddress}`");
                                 continue;
                             }
                             else if (handshake.MessageType != HandshakeType.ClientHello)
                             {
-                                this.Logger.WriteVerbose($"Dropping non-ClientHello re-negotiation Handshake from `{peerAddress}`");
+                                Logger.Error($"Dropping non-ClientHello re-negotiation Handshake from `{peerAddress}`");
                                 continue;
                             }
                             else if (handshakePayload.Length < handshake.Length)
                             {
-                                this.Logger.WriteError($"Dropping malformed re-negotiation Handshake from `{peerAddress}`: Length({handshake.Length}) AvailableBytes({handshakePayload.Length})");
+                                Logger.Error($"Dropping malformed re-negotiation Handshake from `{peerAddress}`: Length({handshake.Length}) AvailableBytes({handshakePayload.Length})");
                             }
 
-                            if (!this.HandleClientHello(peer, peerAddress, ref record, ref handshake, recordPayload, handshakePayload))
+                            if (!await this.HandleClientHello(peer, peerAddress, record, handshake, recordPayload, handshakePayload))
                             {
                                 return;
                             }
                             continue;
                         }
 
-                        this.Logger.WriteVerbose($"Dropping bad-epoch record from `{peerAddress}` RecordEpoch({record.Epoch}) CurrentEpoch({peer.Epoch})");
+                        Logger.Error($"Dropping bad-epoch record from `{peerAddress}` RecordEpoch({record.Epoch}) CurrentEpoch({peer.Epoch})");
                         continue;
                     }
 
@@ -346,13 +441,13 @@ namespace Impostor.Hazel.Dtls
                     {
                         if (windowIndex >= 64)
                         {
-                            this.Logger.WriteInfo($"Dropping too-old record from `{peerAddress}` Sequence({record.SequenceNumber}) Expected({peer.CurrentEpoch.NextExpectedSequence})");
+                            Logger.Information($"Dropping too-old record from `{peerAddress}` Sequence({record.SequenceNumber}) Expected({peer.CurrentEpoch.NextExpectedSequence})");
                             continue;
                         }
 
                         if ((peer.CurrentEpoch.PreviousSequenceWindowBitmask & windowMask) != 0)
                         {
-                            this.Logger.WriteInfo($"Dropping duplicate record from `{peerAddress}`");
+                            Logger.Information($"Dropping duplicate record from `{peerAddress}`");
                             continue;
                         }
                     }
@@ -361,7 +456,7 @@ namespace Impostor.Hazel.Dtls
                     int decryptedSize = peer.CurrentEpoch.RecordProtection.GetDecryptedSize(recordPayload.Length);
                     if (decryptedSize < 0)
                     {
-                        this.Logger.WriteInfo($"Dropping malformed record: Length {recordPayload.Length} Decrypted length: {decryptedSize}");
+                        Logger.Information($"Dropping malformed record: Length {recordPayload.Length} Decrypted length: {decryptedSize}");
                         continue;
                     }
 
@@ -369,7 +464,7 @@ namespace Impostor.Hazel.Dtls
 
                     if (!peer.CurrentEpoch.RecordProtection.DecryptCiphertextFromClient(decryptedPayload, recordPayload, ref record))
                     {
-                        this.Logger.WriteVerbose($"Dropping non-authentic record from `{peerAddress}`");
+                        Logger.Error($"Dropping non-authentic record from `{peerAddress}`");
                         return;
                     }
 
@@ -392,7 +487,7 @@ namespace Impostor.Hazel.Dtls
                         case ContentType.ChangeCipherSpec:
                             if (peer.NextEpoch.State != HandshakeState.ExpectingChangeCipherSpec)
                             {
-                                this.Logger.WriteError($"Dropping unexpected ChangeChiperSpec record from `{peerAddress}` State({peer.NextEpoch.State})");
+                                Logger.Error($"Dropping unexpected ChangeChiperSpec record from `{peerAddress}` State({peer.NextEpoch.State})");
                                 break;
                             }
                             else if (peer.NextEpoch.RecordProtection == null)
@@ -401,13 +496,13 @@ namespace Impostor.Hazel.Dtls
                                 /// happen on a well-formed server.
                                 Debug.Assert(false, "How did we receive a ChangeCipherSpec message without a pending record protection instance?");
 
-                                this.Logger.WriteError($"Dropping ChangeCipherSpec message from `{peerAddress}`: No pending record protection");
+                                Logger.Error($"Dropping ChangeCipherSpec message from `{peerAddress}`: No pending record protection");
                                 break;
                             }
 
                             if (!ChangeCipherSpec.Parse(recordPayload))
                             {
-                                this.Logger.WriteError($"Dropping malformed ChangeCipherSpec message from `{peerAddress}`");
+                                Logger.Error($"Dropping malformed ChangeCipherSpec message from `{peerAddress}`");
                                 break;
                             }
 
@@ -435,27 +530,25 @@ namespace Impostor.Hazel.Dtls
                             break;
 
                         case ContentType.Alert:
-                            this.Logger.WriteError($"Dropping unsupported Alert record from `{peerAddress}`");
+                            Logger.Error($"Dropping unsupported Alert record from `{peerAddress}`");
                             break;
 
                         case ContentType.Handshake:
-                            if (!ProcessHandshake(peer, peerAddress, ref record, recordPayload))
+                            if (!await ProcessHandshake(peer, peerAddress, record, recordPayload))
                             {
                                 return;
                             }
+
                             break;
 
                         case ContentType.ApplicationData:
                             // Forward data to the application
-                            MessageReader reader = MessageReader.GetSized(recordPayload.Length);
-                            reader.Length = recordPayload.Length;
-                            recordPayload.CopyTo(reader.Buffer);
-
-                            base.ProcessIncomingMessageFromOtherThread(reader, peerAddress, peer.ConnectionId);
+                            await base.ProcessData(new UdpReceiveResult(recordPayload.ToArray(), peerAddress));
                             break;
                     }
                 }
             }
+            peer.Semaphore.Release();
         }
 
         /// <summary>
@@ -469,7 +562,7 @@ namespace Impostor.Hazel.Dtls
         /// True if further processing of the underlying datagram
         /// should be continues. Otherwise, false.
         /// </returns>
-        private bool ProcessHandshake(PeerData peer, IPEndPoint peerAddress, ref Record record, ByteSpan message)
+        private async ValueTask<bool> ProcessHandshake(PeerData peer, IPEndPoint peerAddress, Record record, ByteSpan message)
         {
             // Each record may have multiple handshake payloads
             while (message.Length > 0)
@@ -479,14 +572,14 @@ namespace Impostor.Hazel.Dtls
                 Handshake handshake;
                 if (!Handshake.Parse(out handshake, message))
                 {
-                    this.Logger.WriteError($"Dropping malformed Handshake message from `{peerAddress}`");
+                    Logger.Error($"Dropping malformed Handshake message from `{peerAddress}`");
                     return false;
                 }
                 message = message.Slice(Handshake.Size);
 
                 if (message.Length < handshake.Length)
                 {
-                    this.Logger.WriteError($"Dropping malformed Handshake message from `{peerAddress}`");
+                    Logger.Error($"Dropping malformed Handshake message from `{peerAddress}`");
                     return false;
                 }
 
@@ -498,7 +591,7 @@ namespace Impostor.Hazel.Dtls
                 // from the client
                 if (handshake.FragmentOffset != 0 || handshake.FragmentLength != handshake.Length)
                 {
-                    this.Logger.WriteError($"Dropping fragmented Handshake message from `{peerAddress}` Offset({handshake.FragmentOffset}) FragmentLength({handshake.FragmentLength}) Length({handshake.Length})");
+                    Logger.Error($"Dropping fragmented Handshake message from `{peerAddress}` Offset({handshake.FragmentOffset}) FragmentLength({handshake.FragmentLength}) Length({handshake.Length})");
                     continue;
                 }
 
@@ -508,7 +601,7 @@ namespace Impostor.Hazel.Dtls
                 switch (handshake.MessageType)
                 {
                     case HandshakeType.ClientHello:
-                        if (!this.HandleClientHello(peer, peerAddress, ref record, ref handshake, originalMessage, payload))
+                        if (!await this.HandleClientHello(peer, peerAddress, record, handshake, originalMessage, payload))
                         {
                             return false;
                         }
@@ -517,19 +610,19 @@ namespace Impostor.Hazel.Dtls
                     case HandshakeType.ClientKeyExchange:
                         if (peer.NextEpoch.State != HandshakeState.ExpectingClientKeyExchange)
                         {
-                            this.Logger.WriteError($"Dropping unexpected ClientKeyExchange message form `{peerAddress}` State({peer.NextEpoch.State})");
+                            Logger.Error($"Dropping unexpected ClientKeyExchange message form `{peerAddress}` State({peer.NextEpoch.State})");
                             continue;
                         }
                         else if (handshake.MessageSequence != 5)
                         {
-                            this.Logger.WriteError($"Dropping bad-sequence ClientKeyExchange message from `{peerAddress}` MessageSequence({handshake.MessageSequence})");
+                            Logger.Error($"Dropping bad-sequence ClientKeyExchange message from `{peerAddress}` MessageSequence({handshake.MessageSequence})");
                             continue;
                         }
 
                         ByteSpan sharedSecret = new byte[peer.NextEpoch.Handshake.SharedKeySize()];
                         if (!peer.NextEpoch.Handshake.VerifyClientMessageAndGenerateSharedKey(sharedSecret, payload))
                         {
-                            this.Logger.WriteError($"Dropping malformed ClientKeyExchange message from `{peerAddress}`");
+                            Logger.Error($"Dropping malformed ClientKeyExchange message from `{peerAddress}`");
                             return false;
                         }
 
@@ -566,7 +659,7 @@ namespace Impostor.Hazel.Dtls
 
                             default:
                                 Debug.Assert(false, $"How did we agree to a cipher suite {peer.NextEpoch.SelectedCipherSuite} we can't create?");
-                                this.Logger.WriteError($"Dropping ClientKeyExchange message from `{peerAddress}` Unsuppored cipher suite");
+                                Logger.Error($"Dropping ClientKeyExchange message from `{peerAddress}` Unsuppored cipher suite");
                                 return false;
                         }
 
@@ -605,14 +698,14 @@ namespace Impostor.Hazel.Dtls
                         // epoch 0
                         if (peer.Epoch == 0)
                         {
-                            this.Logger.WriteError($"Dropping Finished message for 0-epoch from `{peerAddress}`");
+                            Logger.Error($"Dropping Finished message for 0-epoch from `{peerAddress}`");
                             continue;
                         }
                         // Cannot process a Finished message when we
                         // are negotiating the next epoch
                         else if (peer.NextEpoch.State != HandshakeState.ExpectingHello)
                         {
-                            this.Logger.WriteError($"Dropping Finished message while negotiating new epoch from `{peerAddress}`");
+                            Logger.Error($"Dropping Finished message while negotiating new epoch from `{peerAddress}`");
                             continue;
                         }
                         // Cannot process a Finished message without
@@ -623,7 +716,7 @@ namespace Impostor.Hazel.Dtls
                             /// happen on a well-formed server.
                             Debug.Assert(false, "How do we have an established non-zero epoch without verify data?");
 
-                            this.Logger.WriteError($"Dropping Finished message (no verify data) from `{peerAddress}`");
+                            Logger.Error($"Dropping Finished message (no verify data) from `{peerAddress}`");
                             return false;
                         }
                         // Cannot process a Finished message without
@@ -634,14 +727,14 @@ namespace Impostor.Hazel.Dtls
                             /// happen on a well-formed server.
                             Debug.Assert(false, "How do we have an established non-zero epoch with record protection for the previous epoch?");
 
-                            this.Logger.WriteError($"Dropping Finished message from `{peerAddress}`: No previous epoch record protection");
+                            Logger.Error($"Dropping Finished message from `{peerAddress}`: No previous epoch record protection");
                             return false;
                         }
 
                         // Verify message sequence
                         if (handshake.MessageSequence != 6)
                         {
-                            this.Logger.WriteError($"Dropping bad-sequence Finished message from `{peerAddress}` MessageSequence({handshake.MessageSequence})");
+                            Logger.Error($"Dropping bad-sequence Finished message from `{peerAddress}` MessageSequence({handshake.MessageSequence})");
                             continue;
                         }
 
@@ -649,12 +742,12 @@ namespace Impostor.Hazel.Dtls
                         // handshake sequence
                         if (payload.Length != Finished.Size)
                         {
-                            this.Logger.WriteError($"Dropping malformed Finished message from `{peerAddress}`");
+                            Logger.Error($"Dropping malformed Finished message from `{peerAddress}`");
                             return false;
                         }
                         else if (1 != Crypto.Const.ConstantCompareSpans(payload, peer.CurrentEpoch.ExpectedClientFinishedVerification))
                         {
-                            this.Logger.WriteError($"Dropping non-verified Finished Handshake from `{peerAddress}`");
+                            Logger.Error($"Dropping non-verified Finished Handshake from `{peerAddress}`");
 
                             // Abort the connection here
                             //
@@ -663,7 +756,7 @@ namespace Impostor.Hazel.Dtls
                             //
                             // Either way, there is not a feasible
                             // way to progress the connection.
-                            base.MarkConnectionAsStale(peer.ConnectionId);
+                            // base.MarkConnectionAsStale(peer.ConnectionId);
                             this.existingPeers.TryRemove(peerAddress, out peer);
                             return false;
                         }
@@ -723,12 +816,12 @@ namespace Impostor.Hazel.Dtls
                         // Current epoch can now handle application data
                         peer.CanHandleApplicationData = true;
 
-                        base.QueueRawData(packet, peerAddress);
+                        await SendData(packet, peerAddress);
                         break;
 
                     // Drop messages that we do not support
                     case HandshakeType.CertificateVerify:
-                        this.Logger.WriteError($"Dropping unsupported Handshake message from `{peerAddress}` MessageType({handshake.MessageType})");
+                        Logger.Error($"Dropping unsupported Handshake message from `{peerAddress}` MessageType({handshake.MessageType})");
                         continue;
 
                     // Drop messages that originate from the server
@@ -739,7 +832,7 @@ namespace Impostor.Hazel.Dtls
                     case HandshakeType.ServerKeyExchange:
                     case HandshakeType.CertificateRequest:
                     case HandshakeType.ServerHelloDone:
-                        this.Logger.WriteError($"Dropping server Handshake message from `{peerAddress}` MessageType({handshake.MessageType})");
+                        Logger.Error($"Dropping server Handshake message from `{peerAddress}` MessageType({handshake.MessageType})");
                         continue;
                 }
             }
@@ -755,12 +848,12 @@ namespace Impostor.Hazel.Dtls
         /// <param name="record">Parent record</param>
         /// <param name="handshake">Parent Handshake header</param>
         /// <param name="payload">Handshake payload</param>
-        private bool HandleClientHello(PeerData peer, IPEndPoint peerAddress, ref Record record, ref Handshake handshake, ByteSpan originalMessage, ByteSpan payload)
+        private async ValueTask<bool> HandleClientHello(PeerData peer, IPEndPoint peerAddress, Record record, Handshake handshake, ByteSpan originalMessage, ByteSpan payload)
         {
             // Verify message sequence
             if (handshake.MessageSequence != 0)
             {
-                this.Logger.WriteError($"Dropping bad-sequence ClientHello from `{peerAddress}` MessageSequence({handshake.MessageSequence})`");
+                Logger.Error($"Dropping bad-sequence ClientHello from `{peerAddress}` MessageSequence({handshake.MessageSequence})`");
                 return true;
             }
 
@@ -770,7 +863,7 @@ namespace Impostor.Hazel.Dtls
                 // Always handle ClientHello for epoch 0
                 if (record.Epoch != 0)
                 {
-                    this.Logger.WriteError($"Dropping ClientHello from `{peer}` Not expecting ClientHello");
+                    Logger.Error($"Dropping ClientHello from `{peer}` Not expecting ClientHello");
                     return true;
                 }
             }
@@ -778,7 +871,7 @@ namespace Impostor.Hazel.Dtls
             ClientHello clientHello;
             if (!ClientHello.Parse(out clientHello, payload))
             {
-                this.Logger.WriteError($"Dropping malformed ClientHello Handshake message from `{peerAddress}`");
+                Logger.Error($"Dropping malformed ClientHello Handshake message from `{peerAddress}`");
                 return false;
             }
 
@@ -786,7 +879,7 @@ namespace Impostor.Hazel.Dtls
             CipherSuite selectedCipherSuite = CipherSuite.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256;
             if (!clientHello.ContainsCipherSuite(CipherSuite.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256) || !clientHello.ContainsCurve(NamedCurve.x25519))
             {
-                this.Logger.WriteError($"Dropping ClientHello from `{peerAddress}` No compatible cipher suite");
+                Logger.Error($"Dropping ClientHello from `{peerAddress}` No compatible cipher suite");
                 return false;
             }
 
@@ -806,7 +899,7 @@ namespace Impostor.Hazel.Dtls
                         recordProtection = peer.CurrentEpoch.RecordProtection;
                     }
 
-                    this.SendHelloVerifyRequest(peerAddress, outgoingSequence, record.Epoch, recordProtection);
+                    await this.SendHelloVerifyRequest(peerAddress, outgoingSequence, record.Epoch, recordProtection);
                     return true;
                 }
             }
@@ -821,7 +914,7 @@ namespace Impostor.Hazel.Dtls
 
                 // Inform the parent layer that the existing
                 // connection should be abandoned.
-                base.MarkConnectionAsStale(oldConnectionId);
+                // base.MarkConnectionAsStale(oldConnectionId);
             }
 
             // Determine if this is an original message, or a retransmission
@@ -839,14 +932,14 @@ namespace Impostor.Hazel.Dtls
                         }
                         else
                         {
-                            this.Logger.WriteError($"Dropping ClientHello from `{peerAddress}` Could not create TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 cipher suite");
+                            Logger.Error($"Dropping ClientHello from `{peerAddress}` Could not create TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 cipher suite");
                             return false;
                         }
 
                         break;
 
                     default:
-                        this.Logger.WriteError($"Dropping ClientHello from `{peerAddress}` Could not create handshake cipher suite");
+                        Logger.Error($"Dropping ClientHello from `{peerAddress}` Could not create handshake cipher suite");
                         return false;
                 }
 
@@ -945,7 +1038,7 @@ namespace Impostor.Hazel.Dtls
                 , ref initialRecord
             );
 
-            base.QueueRawData(packet, peerAddress);
+            await SendData(packet, peerAddress);
 
             // Record record payload for verification
             if (recordMessagesForVerifyData)
@@ -1007,7 +1100,7 @@ namespace Impostor.Hazel.Dtls
                     , ref additionalRecord
                 );
 
-                base.QueueRawData(packet, peerAddress);
+                await SendData(packet, peerAddress);
             }
 
             // Describe final record of the flight
@@ -1065,7 +1158,7 @@ namespace Impostor.Hazel.Dtls
                 , ref finalRecord
             );
 
-            base.QueueRawData(packet, peerAddress);
+            await SendData(packet, peerAddress);
 
             return true;
         }
@@ -1075,12 +1168,12 @@ namespace Impostor.Hazel.Dtls
         /// </summary>
         /// <param name="message">Incoming datagram</param>
         /// <param name="peerAddress">Originating address</param>
-        private void HandleNonPeerRecord(ByteSpan message, IPEndPoint peerAddress)
+        private async ValueTask HandleNonPeerRecord(ByteSpan message, IPEndPoint peerAddress)
         {
             Record record;
             if (!Record.Parse(out record, message))
             {
-                this.Logger.WriteError($"Dropping malformed record from non-peer `{peerAddress}`");
+                Logger.Error($"Dropping malformed record from non-peer `{peerAddress}`");
                 return;
             }
             message = message.Slice(Record.Size);
@@ -1097,7 +1190,7 @@ namespace Impostor.Hazel.Dtls
                 /// worst case we're dealing with a malicious actor.
                 /// In the malicious case, we'll end up dropping the
                 /// connection later in the process.
-                this.Logger.WriteInfo($"Received multiple record from non-peer `{peerAddress}`. Dropping all but first");
+                Logger.Information($"Received multiple record from non-peer `{peerAddress}`. Dropping all but first");
                 if (message.Length < record.Length)
                 {
                     return;
@@ -1116,7 +1209,7 @@ namespace Impostor.Hazel.Dtls
             // We only accept Handshake protocol messages from non-peers
             if (record.ContentType != ContentType.Handshake)
             {
-                this.Logger.WriteError($"Dropping non-handhsake message from non-peer `{peerAddress}`");
+                Logger.Error($"Dropping non-handhsake message from non-peer `{peerAddress}`");
                 return;
             }
 
@@ -1125,22 +1218,23 @@ namespace Impostor.Hazel.Dtls
             Handshake handshake;
             if (!Handshake.Parse(out handshake, message))
             {
-                this.Logger.WriteError($"Dropping malformed handshake message from non-peer `{peerAddress}`");
+                Logger.Error($"Dropping malformed handshake message from non-peer `{peerAddress}`");
                 return;
             }
 
             // We only accept ClientHello messages from non-peers
             if (handshake.MessageType != HandshakeType.ClientHello)
             {
-                this.Logger.WriteError($"Dropping non-ClientHello ({handshake.MessageType}) message from non-peer `{peerAddress}`");
+                Logger.Error($"Dropping non-ClientHello ({handshake.MessageType}) message from non-peer `{peerAddress}`");
                 return;
             }
+
             message = message.Slice(Handshake.Size);
 
             ClientHello clientHello;
             if (!ClientHello.Parse(out clientHello, message))
             {
-                this.Logger.WriteError($"Dropping malformed ClientHello message from non-peer `{peerAddress}`");
+                Logger.Error($"Dropping malformed ClientHello message from non-peer `{peerAddress}`");
                 return;
             }
 
@@ -1150,7 +1244,7 @@ namespace Impostor.Hazel.Dtls
             {
                 if (!HelloVerifyRequest.VerifyCookie(clientHello.Cookie, peerAddress, this.previousCookieHmac))
                 {
-                    this.SendHelloVerifyRequest(peerAddress, 1, 0, NullRecordProtection.Instance);
+                    await this.SendHelloVerifyRequest(peerAddress, 1, 0, NullRecordProtection.Instance);
                     return;
                 }
             }
@@ -1161,14 +1255,15 @@ namespace Impostor.Hazel.Dtls
 
             this.existingPeers[peerAddress] = peer;
 
-            lock (peer)
+            await peer.Semaphore.WaitAsync();
             {
-                this.ProcessHandshake(peer, peerAddress, ref record, originalMessage);
+                await this.ProcessHandshake(peer, peerAddress, record, originalMessage);
             }
+            peer.Semaphore.Release();
         }
 
         //Send a HelloVerifyRequest handshake message to a peer
-        private void SendHelloVerifyRequest(IPEndPoint peerAddress, ulong recordSequence, ushort epoch, IRecordProtection recordProtection)
+        private ValueTask SendHelloVerifyRequest(IPEndPoint peerAddress, ulong recordSequence, ushort epoch, IRecordProtection recordProtection)
         {
             // Do we need to rotate the HMAC key?
             DateTime now = DateTime.UtcNow;
@@ -1211,111 +1306,31 @@ namespace Impostor.Hazel.Dtls
                 , ref record
             );
 
-            base.QueueRawData(packet, peerAddress);
-        }
-
-        /// <summary>
-        /// Handle a requrest to send a datagram to the network
-        /// </summary>
-        protected override void QueueRawData(ByteSpan span, IPEndPoint remoteEndPoint)
-        {
-            PeerData peer;
-            if (!this.existingPeers.TryGetValue(remoteEndPoint, out peer))
-            {
-                // Drop messages if we don't know how to send them
-                return;
-            }
-
-            lock (peer)
-            {
-                // If we're negotiating a new epoch, queue data
-                if (peer.Epoch == 0 || peer.NextEpoch.State != HandshakeState.ExpectingHello)
-                {
-                    ByteSpan copyOfSpan = new byte[span.Length];
-                    span.CopyTo(copyOfSpan);
-
-                    peer.QueuedApplicationDataMessage.Add(copyOfSpan);
-                    return;
-                }
-
-                // Send any queued application data now
-                for (int ii = 0, nn = peer.QueuedApplicationDataMessage.Count; ii != nn; ++ii)
-                {
-                    ByteSpan queuedSpan = peer.QueuedApplicationDataMessage[ii];
-
-                    Record outgoingRecord = new Record();
-                    outgoingRecord.ContentType = ContentType.ApplicationData;
-                    outgoingRecord.Epoch = peer.Epoch;
-                    outgoingRecord.SequenceNumber = peer.CurrentEpoch.NextOutgoingSequence;
-                    outgoingRecord.Length = (ushort)peer.CurrentEpoch.RecordProtection.GetEncryptedSize(queuedSpan.Length);
-                    ++peer.CurrentEpoch.NextOutgoingSequence;
-
-                    // Encode the record to wire format
-                    ByteSpan packet = new byte[Record.Size + outgoingRecord.Length];
-                    ByteSpan writer = packet;
-                    outgoingRecord.Encode(writer);
-                    writer = writer.Slice(Record.Size);
-                    queuedSpan.CopyTo(writer);
-
-                    // Protect the record
-                    peer.CurrentEpoch.RecordProtection.EncryptServerPlaintext(
-                        packet.Slice(Record.Size, outgoingRecord.Length)
-                        , packet.Slice(Record.Size, queuedSpan.Length)
-                        , ref outgoingRecord);
-
-                    base.QueueRawData(packet, remoteEndPoint);
-                }
-                peer.QueuedApplicationDataMessage.Clear();
-
-                {
-                    Record outgoingRecord = new Record();
-                    outgoingRecord.ContentType = ContentType.ApplicationData;
-                    outgoingRecord.Epoch = peer.Epoch;
-                    outgoingRecord.SequenceNumber = peer.CurrentEpoch.NextOutgoingSequence;
-                    outgoingRecord.Length = (ushort)peer.CurrentEpoch.RecordProtection.GetEncryptedSize(span.Length);
-                    ++peer.CurrentEpoch.NextOutgoingSequence;
-
-                    // Encode the record to wire format
-                    ByteSpan packet = new byte[Record.Size + outgoingRecord.Length];
-                    ByteSpan writer = packet;
-                    outgoingRecord.Encode(writer);
-                    writer = writer.Slice(Record.Size);
-                    span.CopyTo(writer);
-
-                    // Protect the record
-                    peer.CurrentEpoch.RecordProtection.EncryptServerPlaintext(
-                        packet.Slice(Record.Size, outgoingRecord.Length)
-                        , packet.Slice(Record.Size, span.Length)
-                        , ref outgoingRecord
-                    );
-
-                    base.QueueRawData(packet, remoteEndPoint);
-                }
-            }
+            return SendData(packet, peerAddress);
         }
 
         /// <inheritdoc />
-        public override void DisconnectOldConnections(TimeSpan maxAge, MessageWriter disconnectMessage)
-        {
-            DateTime now = DateTime.UtcNow;
-            foreach (KeyValuePair<IPEndPoint, PeerData> kvp in this.existingPeers)
-            {
-                PeerData peer = kvp.Value;
-                lock(peer)
-                {
-                    if (peer.Epoch == 0 || peer.NextEpoch.State != HandshakeState.ExpectingHello)
-                    {
-                        TimeSpan negotiationAge = now - peer.StartOfNegotiation;
-                        if (negotiationAge > maxAge)
-                        {
-                            base.MarkConnectionAsStale(peer.ConnectionId);
-                        }
-                    }
-                }
-            }
-
-            base.DisconnectOldConnections(maxAge, disconnectMessage);
-        }
+        // public override ValueTask DisconnectOldConnections(TimeSpan maxAge, MessageWriter disconnectMessage)
+        // {
+        //     DateTime now = DateTime.UtcNow;
+        //     foreach (KeyValuePair<IPEndPoint, PeerData> kvp in this.existingPeers)
+        //     {
+        //         PeerData peer = kvp.Value;
+        //         lock (peer)
+        //         {
+        //             if (peer.Epoch == 0 || peer.NextEpoch.State != HandshakeState.ExpectingHello)
+        //             {
+        //                 TimeSpan negotiationAge = now - peer.StartOfNegotiation;
+        //                 if (negotiationAge > maxAge)
+        //                 {
+        //                     base.MarkConnectionAsStale(peer.ConnectionId);
+        //                 }
+        //             }
+        //         }
+        //     }
+        //
+        //     return base.DisconnectOldConnections(maxAge, disconnectMessage);
+        // }
 
         /// <summary>
         /// Allocate a new connection id

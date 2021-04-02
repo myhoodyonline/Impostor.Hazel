@@ -2,6 +2,7 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Threading;
+using System.Threading.Tasks;
 
 namespace Impostor.Hazel.Udp
 {
@@ -13,7 +14,7 @@ namespace Impostor.Hazel.Udp
         /// </summary>
         public class PingPacket : IRecyclable
         {
-            private static readonly ObjectPool<PingPacket> PacketPool = new ObjectPool<PingPacket>(() => new PingPacket());
+            private static readonly ObjectPoolCustom<PingPacket> PacketPool = new ObjectPoolCustom<PingPacket>(() => new PingPacket());
 
             public readonly Stopwatch Stopwatch = new Stopwatch();
 
@@ -80,21 +81,21 @@ namespace Impostor.Hazel.Udp
             );
         }
 
-        private void HandleKeepAlive(object state)
+        private async void HandleKeepAlive(object state)
         {
             if (this.State != ConnectionState.Connected) return;
 
             if (this.pingsSinceAck >= this.MissingPingsUntilDisconnect)
             {
                 this.DisposeKeepAliveTimer();
-                this.DisconnectInternal(HazelInternalErrors.PingsWithoutResponse, $"Sent {this.pingsSinceAck} pings that remote has not responded to.");
+                await this.DisconnectInternal(HazelInternalErrors.PingsWithoutResponse, $"Sent {this.pingsSinceAck} pings that remote has not responded to.");
                 return;
             }
 
             try
             {
-                this.pingsSinceAck++;
-                SendPing();
+                Interlocked.Increment(ref pingsSinceAck);
+                await SendPing();
             }
             catch
             {
@@ -106,7 +107,7 @@ namespace Impostor.Hazel.Udp
         // An unacked ping should never be the sole cause of a disconnect.
         // Rather, the responses will reset our pingsSinceAck, enough unacked 
         // pings should cause a disconnect.
-        private void SendPing()
+        private async ValueTask SendPing()
         {
             ushort id = (ushort)Interlocked.Increment(ref lastIDAllocated);
 
@@ -127,7 +128,7 @@ namespace Impostor.Hazel.Udp
 
             pkt.Stopwatch.Restart();
 
-            WriteBytesToConnection(bytes, bytes.Length);
+            await WriteBytesToConnection(bytes, bytes.Length);
 
             Statistics.LogReliableSend(0, bytes.Length);
         }

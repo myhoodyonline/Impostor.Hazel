@@ -5,6 +5,7 @@ using Hazel;
 using System.Net;
 using System.Threading;
 using System.Diagnostics;
+using Impostor.Api.Net.Messages;
 using Impostor.Hazel;
 using Impostor.Hazel.FewerThreads;
 using DataReceivedEventArgs = Impostor.Hazel.DataReceivedEventArgs;
@@ -19,7 +20,7 @@ namespace Hazel.UnitTests
         /// </summary>
         /// <param name="listener">The listener to test.</param>
         /// <param name="connection">The connection to test.</param>
-        internal static void RunServerToClientTest(ThreadLimitedUdpConnectionListener listener, Connection connection, int dataSize, SendOption sendOption)
+        internal static void RunServerToClientTest(ThreadLimitedUdpConnectionListener listener, Connection connection, int dataSize, MessageType sendOption)
         {
             //Setup meta stuff 
             byte[] data = BuildData(dataSize);
@@ -61,7 +62,7 @@ namespace Hazel.UnitTests
                 Assert.AreEqual(data[i], args.Value.Message.ReadByte());
             }
 
-            Assert.AreEqual(sendOption, args.Value.SendOption);
+            Assert.AreEqual(sendOption, args.Value.Type);
         }
 
         /// <summary>
@@ -69,7 +70,7 @@ namespace Hazel.UnitTests
         /// </summary>
         /// <param name="listener">The listener to test.</param>
         /// <param name="connection">The connection to test.</param>
-        internal static void RunServerToClientTest(NetworkConnectionListener listener, Connection connection, int dataSize, SendOption sendOption)
+        internal static void RunServerToClientTest(NetworkConnectionListener listener, Connection connection, int dataSize, MessageType sendOption)
         {
             //Setup meta stuff 
             byte[] data = BuildData(dataSize);
@@ -111,7 +112,7 @@ namespace Hazel.UnitTests
                 Assert.AreEqual(data[i], args.Value.Message.ReadByte());
             }
 
-            Assert.AreEqual(sendOption, args.Value.SendOption);
+            Assert.AreEqual(sendOption, args.Value.Type);
         }
 
         /// <summary>
@@ -119,7 +120,7 @@ namespace Hazel.UnitTests
         /// </summary>
         /// <param name="listener">The listener to test.</param>
         /// <param name="connection">The connection to test.</param>
-        internal static void RunClientToServerTest(NetworkConnectionListener listener, Connection connection, int dataSize, SendOption sendOption)
+        internal static void RunClientToServerTest(NetworkConnectionListener listener, Connection connection, int dataSize, MessageType sendOption)
         {
             //Setup meta stuff 
             byte[] data = BuildData(dataSize);
@@ -161,7 +162,7 @@ namespace Hazel.UnitTests
                 Assert.AreEqual(data[i], result.Value.Message.ReadByte());
             }
 
-            Assert.AreEqual(sendOption, result.Value.SendOption);
+            Assert.AreEqual(sendOption, result.Value.Type);
         }
 
 
@@ -170,7 +171,7 @@ namespace Hazel.UnitTests
         /// </summary>
         /// <param name="listener">The listener to test.</param>
         /// <param name="connection">The connection to test.</param>
-        internal static void RunClientToServerTest(ThreadLimitedUdpConnectionListener listener, Connection connection, int dataSize, SendOption sendOption)
+        internal static void RunClientToServerTest(ThreadLimitedUdpConnectionListener listener, Connection connection, int dataSize, MessageType sendOption)
         {
             //Setup meta stuff 
             byte[] data = BuildData(dataSize);

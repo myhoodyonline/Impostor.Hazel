@@ -1,5 +1,8 @@
 using System;
 using System.Net;
+using System.Threading.Tasks;
+using Impostor.Api.Net.Messages;
+using Microsoft.Extensions.ObjectPool;
 
 namespace Impostor.Hazel.Udp
 {
@@ -24,8 +27,8 @@ namespace Impostor.Hazel.Udp
         /// <param name="listener">The listener that created this connection.</param>
         /// <param name="endPoint">The endpoint that we are connected to.</param>
         /// <param name="IPMode">The IPMode we are connected using.</param>
-        internal UdpServerConnection(UdpConnectionListener listener, IPEndPoint endPoint, IPMode IPMode)
-            : base()
+        internal UdpServerConnection(UdpConnectionListener listener, IPEndPoint endPoint, IPMode IPMode, ObjectPool<MessageReader> readerPool)
+            : base(listener, readerPool)
         {
             this.Listener = listener;
             this.EndPoint = endPoint;
@@ -36,25 +39,16 @@ namespace Impostor.Hazel.Udp
         }
 
         /// <inheritdoc />
-        protected override void WriteBytesToConnection(byte[] bytes, int length)
+        protected override ValueTask WriteBytesToConnection(byte[] bytes, int length)
         {
-            Listener.SendData(bytes, length, EndPoint);
+            return Listener.SendData(bytes, length, EndPoint);
         }
 
         /// <inheritdoc />
         /// <remarks>
         ///     This will always throw a HazelException.
         /// </remarks>
-        public override void Connect(byte[] bytes = null, int timeout = 5000)
-        {
-            throw new InvalidOperationException("Cannot manually connect a UdpServerConnection, did you mean to use UdpClientConnection?");
-        }
-
-        /// <inheritdoc />
-        /// <remarks>
-        ///     This will always throw a HazelException.
-        /// </remarks>
-        public override void ConnectAsync(byte[] bytes = null)
+        public override ValueTask ConnectAsync(byte[] bytes = null, int timeout = 5000)
         {
             throw new InvalidOperationException("Cannot manually connect a UdpServerConnection, did you mean to use UdpClientConnection?");
         }
@@ -62,18 +56,18 @@ namespace Impostor.Hazel.Udp
         /// <summary>
         ///     Sends a disconnect message to the end point.
         /// </summary>
-        protected override bool SendDisconnect(MessageWriter data = null)
+        protected override async ValueTask<bool> SendDisconnect(MessageWriter data = null)
         {
             lock (this)
             {
                 if (this._state != ConnectionState.Connected) return false;
                 this._state = ConnectionState.NotConnected;
             }
-            
+
             var bytes = EmptyDisconnectBytes;
             if (data != null && data.Length > 0)
             {
-                if (data.SendOption != SendOption.None) throw new ArgumentException("Disconnect messages can only be unreliable.");
+                if (data.SendOption != MessageType.Unreliable) throw new ArgumentException("Disconnect messages can only be unreliable.");
 
                 bytes = data.ToByteArray(true);
                 bytes[0] = (byte)UdpSendOption.Disconnect;
@@ -81,7 +75,7 @@ namespace Impostor.Hazel.Udp
 
             try
             {
-                Listener.SendDataSync(bytes, bytes.Length, EndPoint);
+                await Listener.SendData(bytes, bytes.Length, EndPoint);
             }
             catch { }
 
@@ -94,7 +88,7 @@ namespace Impostor.Hazel.Udp
 
             if (disposing)
             {
-                SendDisconnect();
+                _ = SendDisconnect();
             }
 
             base.Dispose(disposing);

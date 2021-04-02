@@ -1,20 +1,21 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Net;
+using System.Numerics;
 using System.Text;
+using Impostor.Api.Games;
+using Impostor.Api.Net.Inner;
+using Impostor.Api.Net.Messages;
+using Impostor.Api.Unity;
 
 namespace Impostor.Hazel
 {
-    ///
-    public class MessageWriter : IRecyclable
+    public class MessageWriter : IMessageWriter, IRecyclable
     {
         public static int BufferSize = 64000;
-        public static readonly ObjectPool<MessageWriter> WriterPool = new ObjectPool<MessageWriter>(() => new MessageWriter(BufferSize));
+        private static readonly ObjectPoolCustom<MessageWriter> WriterPool = new ObjectPoolCustom<MessageWriter>(() => new MessageWriter(BufferSize));
 
-        public byte[] Buffer;
-        public int Length;
-        public int Position;
-
-        public SendOption SendOption { get; private set; }
+        public MessageType SendOption { get; private set; }
 
         private Stack<int> messageStarts = new Stack<int>();
         
@@ -29,6 +30,10 @@ namespace Impostor.Hazel
         {
             this.Buffer = new byte[bufferSize];
         }
+        
+        public byte[] Buffer { get; }
+        public int Length { get; set; }
+        public int Position { get; set; }
 
         public byte[] ToByteArray(bool includeHeader)
         {
@@ -42,13 +47,13 @@ namespace Impostor.Hazel
             {
                 switch (this.SendOption)
                 {
-                    case SendOption.Reliable:
+                    case MessageType.Reliable:
                         {
                             byte[] output = new byte[this.Length - 3];
                             System.Buffer.BlockCopy(this.Buffer, 3, output, 0, this.Length - 3);
                             return output;
                         }
-                    case SendOption.None:
+                    case MessageType.Unreliable:
                         {
                             byte[] output = new byte[this.Length - 1];
                             System.Buffer.BlockCopy(this.Buffer, 1, output, 0, this.Length - 1);
@@ -62,7 +67,7 @@ namespace Impostor.Hazel
 
         ///
         /// <param name="sendOption">The option specifying how the message should be sent.</param>
-        public static MessageWriter Get(SendOption sendOption = SendOption.None)
+        public static MessageWriter Get(MessageType sendOption = MessageType.Unreliable)
         {
             var output = WriterPool.GetObject();
             output.Clear(sendOption);
@@ -72,7 +77,7 @@ namespace Impostor.Hazel
 
         public bool HasBytes(int expected)
         {
-            if (this.SendOption == SendOption.None)
+            if (this.SendOption == MessageType.Unreliable)
             {
                 return this.Length > 1 + expected;
             }
@@ -83,11 +88,8 @@ namespace Impostor.Hazel
         ///
         public void StartMessage(byte typeFlag)
         {
-            var messageStart = this.Position;
-            messageStarts.Push(messageStart);
-            this.Buffer[messageStart] = 0;
-            this.Buffer[messageStart + 1] = 0;
-            this.Position += 2;
+            messageStarts.Push(this.Position);
+            this.Position += 2; // Skip for size
             this.Write(typeFlag);
         }
 
@@ -107,19 +109,19 @@ namespace Impostor.Hazel
             this.Length = this.Position;
         }
 
-        public void Clear(SendOption sendOption)
+        public void Clear(MessageType sendOption)
         {
-            Array.Clear(this.Buffer, 0, this.Buffer.Length);
             this.messageStarts.Clear();
             this.SendOption = sendOption;
             this.Buffer[0] = (byte)sendOption;
             switch (sendOption)
             {
                 default:
-                case SendOption.None:
+                case MessageType.Unreliable:
                     this.Length = this.Position = 1;
                     break;
-                case SendOption.Reliable:
+
+                case MessageType.Reliable:
                     this.Length = this.Position = 3;
                     break;
             }
@@ -133,25 +135,6 @@ namespace Impostor.Hazel
         }
 
         #region WriteMethods
-
-        public void CopyFrom(MessageReader target)
-        {
-            int offset, length;
-            if (target.Tag == byte.MaxValue)
-            {
-                offset = target.Offset;
-                length = target.Length;
-            }
-            else
-            {
-                offset = target.Offset - 3;
-                length = target.Length + 3;
-            }
-
-            System.Buffer.BlockCopy(target.Buffer, offset, this.Buffer, this.Position, length);
-            this.Position += length;
-            if (this.Position > this.Length) this.Length = this.Position;
-        }
 
         public void Write(bool value)
         {
@@ -244,6 +227,19 @@ namespace Impostor.Hazel
             this.Write(bytes, offset, length);
         }
 
+        public void Write(ReadOnlyMemory<byte> data)
+        {
+            Write(data.Span);
+        }
+
+        public void Write(ReadOnlySpan<byte> bytes)
+        {
+            bytes.CopyTo(this.Buffer.AsSpan(this.Position, bytes.Length));
+
+            this.Position += bytes.Length;
+            if (this.Position > this.Length) this.Length = this.Position;
+        }
+
         public void Write(byte[] bytes)
         {
             Array.Copy(bytes, 0, this.Buffer, this.Position, bytes.Length);
@@ -286,8 +282,7 @@ namespace Impostor.Hazel
                 value >>= 7;
             } while (value > 0);
         }
-        #endregion
-
+        
         public void Write(MessageWriter msg, bool includeHeader)
         {
             int offset = 0;
@@ -295,10 +290,10 @@ namespace Impostor.Hazel
             {
                 switch (msg.SendOption)
                 {
-                    case SendOption.None:
+                    case MessageType.Unreliable:
                         offset = 1;
                         break;
-                    case SendOption.Reliable:
+                    case MessageType.Reliable:
                         offset = 3;
                         break;
                 }
@@ -306,6 +301,36 @@ namespace Impostor.Hazel
 
             this.Write(msg.Buffer, offset, msg.Length - offset);
         }
+
+        public void Write(IPAddress value)
+        {
+            this.Write(value.GetAddressBytes());
+        }
+
+        public void Write(GameCode value)
+        {
+            this.Write(value.Value);
+        }
+
+        public void Write(IInnerNetObject innerNetObject)
+        {
+            if (innerNetObject == null)
+            {
+                this.Write(0);
+            }
+            else
+            {
+                this.WritePacked(innerNetObject.NetId);
+            }
+        }
+
+        public void Write(Vector2 vector)
+        {
+            Write((ushort)(Mathf.ReverseLerp(vector.X) * (double) ushort.MaxValue));
+            Write((ushort)(Mathf.ReverseLerp(vector.Y) * (double) ushort.MaxValue));
+        }
+
+        #endregion
 
         public unsafe static bool IsLittleEndian()
         {
@@ -318,6 +343,11 @@ namespace Impostor.Hazel
             }
 
             return b == 1;
+        }
+
+        public void Dispose()
+        {
+            Recycle();
         }
     }
 }

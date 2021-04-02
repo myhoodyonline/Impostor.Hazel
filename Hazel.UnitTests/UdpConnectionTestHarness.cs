@@ -1,10 +1,9 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Linq;
-using System.Text;
 using System.Threading.Tasks;
 using Impostor.Hazel;
 using Impostor.Hazel.Udp;
+using Microsoft.Extensions.ObjectPool;
 
 namespace Hazel.UnitTests
 {
@@ -13,35 +12,36 @@ namespace Hazel.UnitTests
         public List<MessageReader> BytesSent = new List<MessageReader>();
         public ushort ReliableReceiveLast => this.reliableReceiveLast;
 
-
-        public override void Connect(byte[] bytes = null, int timeout = 5000)
+        public UdpConnectionTestHarness(ConnectionListener listener, ObjectPool<MessageReader> readerPool) : base(listener, readerPool)
         {
-            this.State = ConnectionState.Connected;
         }
 
-        public override void ConnectAsync(byte[] bytes = null)
+        public override ValueTask ConnectAsync(byte[] bytes = null, int timeout = 5000)
         {
             this.State = ConnectionState.Connected;
+            return default;
         }
 
-        protected override bool SendDisconnect(MessageWriter writer)
+        protected override ValueTask<bool> SendDisconnect(MessageWriter writer)
         {
             lock (this)
             {
                 if (this.State != ConnectionState.Connected)
                 {
-                    return false;
+                    return ValueTask.FromResult(false);
                 }
 
                 this.State = ConnectionState.NotConnected;
             }
 
-            return true;
+            return ValueTask.FromResult(true);
         }
 
-        protected override void WriteBytesToConnection(byte[] bytes, int length)
+        protected override ValueTask WriteBytesToConnection(byte[] bytes, int length)
         {
-            this.BytesSent.Add(MessageReader.Get(bytes));
+            var data = _readerPool.Get();
+            data.Update(bytes);
+            this.BytesSent.Add(data);
         }
 
         public void Test_Receive(MessageWriter msg)
@@ -49,7 +49,8 @@ namespace Hazel.UnitTests
             byte[] buffer = new byte[msg.Length];
             Buffer.BlockCopy(msg.Buffer, 0, buffer, 0, msg.Length);
 
-            var data = MessageReader.Get(buffer);
+            var data = _readerPool.Get();
+            data.Update(buffer);
             this.HandleReceive(data, data.Length);
         }
     }
