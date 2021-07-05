@@ -95,6 +95,11 @@ namespace Impostor.Hazel
             ((MessageReader) message).Parent.AdjustLength(message.Offset, message.Length + 3);
         }
 
+        public void InsertMessage(IMessageReader reader, IMessageWriter writer)
+        {
+            throw new NotImplementedException();
+        }
+
         private void AdjustLength(int offset, int amount)
         {
             this.Length -= amount;
@@ -169,6 +174,20 @@ namespace Impostor.Hazel
         {
             var output = BinaryPrimitives.ReadInt32LittleEndian(Buffer.AsSpan(ReadPosition));
             Position += sizeof(int);
+            return output;
+        }
+
+        public ulong ReadUInt64()
+        {
+            var output = BinaryPrimitives.ReadUInt64LittleEndian(Buffer.AsSpan(ReadPosition));
+            Position += sizeof(ulong);
+            return output;
+        }
+
+        public long ReadInt64()
+        {
+            var output = BinaryPrimitives.ReadInt64LittleEndian(Buffer.AsSpan(ReadPosition));
+            Position += sizeof(long);
             return output;
         }
 
