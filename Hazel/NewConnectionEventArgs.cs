@@ -1,4 +1,4 @@
-﻿using Impostor.Api.Net.Messages;
+﻿using Impostor.Hazel.Abstractions;
 
 namespace Impostor.Hazel
 {

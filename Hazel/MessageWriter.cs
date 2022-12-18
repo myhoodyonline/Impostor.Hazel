@@ -1,12 +1,8 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Net;
-using System.Numerics;
 using System.Text;
-using Impostor.Api.Games;
-using Impostor.Api.Net.Inner;
-using Impostor.Api.Net.Messages;
-using Impostor.Api.Unity;
+using Impostor.Hazel.Abstractions;
 
 namespace Impostor.Hazel
 {
@@ -18,19 +14,18 @@ namespace Impostor.Hazel
         public MessageType SendOption { get; private set; }
 
         private Stack<int> messageStarts = new Stack<int>();
-        
+
         public MessageWriter(byte[] buffer)
         {
             this.Buffer = buffer;
             this.Length = this.Buffer.Length;
         }
 
-        ///
         public MessageWriter(int bufferSize)
         {
             this.Buffer = new byte[bufferSize];
         }
-        
+
         public byte[] Buffer { get; }
         public int Length { get; set; }
         public int Position { get; set; }
@@ -48,24 +43,23 @@ namespace Impostor.Hazel
                 switch (this.SendOption)
                 {
                     case MessageType.Reliable:
-                        {
-                            byte[] output = new byte[this.Length - 3];
-                            System.Buffer.BlockCopy(this.Buffer, 3, output, 0, this.Length - 3);
-                            return output;
-                        }
+                    {
+                        byte[] output = new byte[this.Length - 3];
+                        System.Buffer.BlockCopy(this.Buffer, 3, output, 0, this.Length - 3);
+                        return output;
+                    }
                     case MessageType.Unreliable:
-                        {
-                            byte[] output = new byte[this.Length - 1];
-                            System.Buffer.BlockCopy(this.Buffer, 1, output, 0, this.Length - 1);
-                            return output;
-                        }
+                    {
+                        byte[] output = new byte[this.Length - 1];
+                        System.Buffer.BlockCopy(this.Buffer, 1, output, 0, this.Length - 1);
+                        return output;
+                    }
                 }
             }
 
             throw new NotImplementedException();
         }
 
-        ///
         /// <param name="sendOption">The option specifying how the message should be sent.</param>
         public static MessageWriter Get(MessageType sendOption = MessageType.Unreliable)
         {
@@ -85,7 +79,6 @@ namespace Impostor.Hazel
             return this.Length > 3 + expected;
         }
 
-        ///
         public void StartMessage(byte typeFlag)
         {
             messageStarts.Push(this.Position);
@@ -93,7 +86,6 @@ namespace Impostor.Hazel
             this.Write(typeFlag);
         }
 
-        ///
         public void EndMessage()
         {
             var lastMessageStart = messageStarts.Pop();
@@ -102,7 +94,6 @@ namespace Impostor.Hazel
             this.Buffer[lastMessageStart + 1] = (byte)(length >> 8);
         }
 
-        ///
         public void CancelMessage()
         {
             this.Position = this.messageStarts.Pop();
@@ -127,7 +118,6 @@ namespace Impostor.Hazel
             }
         }
 
-        ///
         public void Recycle()
         {
             this.Position = this.Length = 0;
@@ -287,13 +277,11 @@ namespace Impostor.Hazel
             if (this.Position > this.Length) this.Length = this.Position;
         }
 
-        ///
         public void WritePacked(int value)
         {
             this.WritePacked((uint)value);
         }
 
-        ///
         public void WritePacked(uint value)
         {
             do
@@ -308,7 +296,7 @@ namespace Impostor.Hazel
                 value >>= 7;
             } while (value > 0);
         }
-        
+
         public void Write(MessageWriter msg, bool includeHeader)
         {
             int offset = 0;
@@ -333,43 +321,7 @@ namespace Impostor.Hazel
             this.Write(value.GetAddressBytes());
         }
 
-        public void Write(GameCode value)
-        {
-            this.Write(value.Value);
-        }
-
-        public void Write(IInnerNetObject innerNetObject)
-        {
-            if (innerNetObject == null)
-            {
-                this.Write(0);
-            }
-            else
-            {
-                this.WritePacked(innerNetObject.NetId);
-            }
-        }
-
-        public void Write(Vector2 vector)
-        {
-            Write((ushort)(Mathf.ReverseLerp(vector.X) * (double) ushort.MaxValue));
-            Write((ushort)(Mathf.ReverseLerp(vector.Y) * (double) ushort.MaxValue));
-        }
-
         #endregion
-
-        public unsafe static bool IsLittleEndian()
-        {
-            byte b;
-            unsafe
-            {
-                int i = 1;
-                byte* bp = (byte*)&i;
-                b = *bp;
-            }
-
-            return b == 1;
-        }
 
         public void Dispose()
         {

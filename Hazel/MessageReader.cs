@@ -1,13 +1,8 @@
 ﻿using System;
 using System.Buffers.Binary;
-using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Text;
-using Impostor.Api;
-using Impostor.Api.Games;
-using Impostor.Api.Net.Inner;
-using Impostor.Api.Net.Messages;
-using Impostor.Api.Unity;
+using Impostor.Hazel.Abstractions;
 using Microsoft.Extensions.ObjectPool;
 
 namespace Impostor.Hazel
@@ -78,7 +73,7 @@ namespace Impostor.Hazel
         {
             if (message.Buffer != Buffer)
             {
-                throw new ImpostorProtocolException("Tried to remove message from a message that does not have the same buffer.");
+                throw new InvalidOperationException("Tried to remove message from a message that does not have the same buffer.");
             }
 
             // Offset of where to start removing.
@@ -223,13 +218,11 @@ namespace Impostor.Hazel
             return output;
         }
 
-        ///
         public int ReadPackedInt32()
         {
             return (int)this.ReadPackedUInt32();
         }
 
-        ///
         public uint ReadPackedUInt32()
         {
             bool readMore = true;
@@ -254,21 +247,6 @@ namespace Impostor.Hazel
             }
 
             return output;
-        }
-
-        public T ReadNetObject<T>(IGame game) where T : IInnerNetObject
-        {
-            return game.FindObjectByNetId<T>(ReadPackedUInt32());
-        }
-
-        public Vector2 ReadVector2()
-        {
-            const float range = 50f;
-
-            var x = ReadUInt16() / (float)ushort.MaxValue;
-            var y = ReadUInt16() / (float)ushort.MaxValue;
-
-            return new Vector2(Mathf.Lerp(-range, range, x), Mathf.Lerp(-range, range, y));
         }
 
         #endregion

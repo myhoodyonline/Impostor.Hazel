@@ -3,7 +3,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Threading;
 using System.Threading.Tasks;
-using Impostor.Api.Net.Messages;
+using Impostor.Hazel.Abstractions;
 using Microsoft.Extensions.ObjectPool;
 
 namespace Impostor.Hazel.Udp

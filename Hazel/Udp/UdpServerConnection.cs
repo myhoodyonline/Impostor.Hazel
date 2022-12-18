@@ -1,7 +1,7 @@
 using System;
 using System.Net;
 using System.Threading.Tasks;
-using Impostor.Api.Net.Messages;
+using Impostor.Hazel.Abstractions;
 using Microsoft.Extensions.ObjectPool;
 
 namespace Impostor.Hazel.Udp
