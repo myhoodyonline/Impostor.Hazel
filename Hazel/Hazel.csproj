@@ -6,6 +6,7 @@
     <DefineConstants>HAZEL_BAG</DefineConstants>
     <RootNamespace>Impostor.Hazel</RootNamespace>
     <AssemblyName>Impostor.Hazel</AssemblyName>
+    <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
   </PropertyGroup>
 
   <ItemGroup>
