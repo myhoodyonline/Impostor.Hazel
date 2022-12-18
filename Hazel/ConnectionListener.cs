@@ -1,6 +1,6 @@
 ﻿using System;
 using System.Threading.Tasks;
-using Impostor.Api.Net.Messages;
+using Impostor.Hazel.Abstractions;
 using Serilog;
 
 namespace Impostor.Hazel
