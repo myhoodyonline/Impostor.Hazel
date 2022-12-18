@@ -29,4 +29,4 @@ jobs:
       - name: Push NuGet package
         if: github.ref_type == 'tag'
         run: |
-          dotnet nuget push ./{Hazel,Impostor.Hazel.Abstractions}/bin/Release/*.nupkg --source ${{ secrets.NUGET_SOURCE }} --api-key ${{ secrets.NUGET_KEY }}
+          dotnet nuget push ./{Hazel,Impostor.Hazel.Abstractions}/bin/Release/*.nupkg --source https://api.nuget.org/v3/index.json --api-key ${{ secrets.NUGET_KEY }}
