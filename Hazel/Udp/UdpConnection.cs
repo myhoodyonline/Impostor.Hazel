@@ -2,7 +2,7 @@ using System;
 using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
-using Impostor.Api.Net.Messages;
+using Impostor.Hazel.Abstractions;
 using Microsoft.Extensions.ObjectPool;
 using Serilog;
 
